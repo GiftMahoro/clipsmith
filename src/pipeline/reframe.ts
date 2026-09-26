@@ -14,11 +14,17 @@ function getDetector(): Promise<Detector> {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const mod = (await import('@mediapipe/tasks-vision')) as any
       const vision = await mod.FilesetResolver.forVisionTasks(WASM_URL)
-      return mod.FaceDetector.createFromOptions(vision, {
-        baseOptions: { modelAssetPath: MODEL_URL, delegate: 'GPU' },
+      const opts = (delegate: string) => ({
+        baseOptions: { modelAssetPath: MODEL_URL, delegate },
         runningMode: 'VIDEO',
         minDetectionConfidence: 0.45,
       })
+      try {
+        return await mod.FaceDetector.createFromOptions(vision, opts('GPU'))
+      } catch {
+        // Headless / no-WebGL environments: fall back to CPU so tracking still works.
+        return await mod.FaceDetector.createFromOptions(vision, opts('CPU'))
+      }
     })()
   }
   return detectorPromise
