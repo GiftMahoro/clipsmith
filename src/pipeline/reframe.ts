@@ -6,24 +6,43 @@ const MODEL_URL =
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Detector = any
-let detectorPromise: Promise<Detector> | null = null
+let detectorPromise: Promise<Detector | null> | null = null
 
-function getDetector(): Promise<Detector> {
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('Face detector timed out')), ms)
+  })
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer))
+}
+
+/**
+ * Loads the MediaPipe face detector once. Never throws and never hangs:
+ * GPU delegate is tried first (25s), then CPU (30s); if both fail we return
+ * null and the caller falls back to a center crop. The null is cached so a
+ * broken environment doesn't retry on every clip.
+ */
+function getDetector(): Promise<Detector | null> {
   if (!detectorPromise) {
     detectorPromise = (async () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const mod = (await import('@mediapipe/tasks-vision')) as any
-      const vision = await mod.FilesetResolver.forVisionTasks(WASM_URL)
-      const opts = (delegate: string) => ({
-        baseOptions: { modelAssetPath: MODEL_URL, delegate },
-        runningMode: 'VIDEO',
-        minDetectionConfidence: 0.45,
-      })
       try {
-        return await mod.FaceDetector.createFromOptions(vision, opts('GPU'))
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const mod = (await import('@mediapipe/tasks-vision')) as any
+        const vision = await withTimeout(mod.FilesetResolver.forVisionTasks(WASM_URL), 25000)
+        const make = (delegate: string) =>
+          mod.FaceDetector.createFromOptions(vision, {
+            baseOptions: { modelAssetPath: MODEL_URL, delegate },
+            runningMode: 'VIDEO',
+            minDetectionConfidence: 0.45,
+          })
+        try {
+          return await withTimeout(make('GPU'), 25000)
+        } catch {
+          // Headless / no-WebGL environments: fall back to CPU so tracking still works.
+          return await withTimeout(make('CPU'), 30000)
+        }
       } catch {
-        // Headless / no-WebGL environments: fall back to CPU so tracking still works.
-        return await mod.FaceDetector.createFromOptions(vision, opts('CPU'))
+        return null
       }
     })()
   }
@@ -80,6 +99,7 @@ export async function computeFaceTrack(
   onProgress?: (fraction: number) => void,
 ): Promise<FaceTrack | null> {
   const detector = await getDetector()
+  if (!detector) return null // MediaPipe unavailable — caller falls back to center crop.
   const video = document.createElement('video')
   video.src = videoUrl
   video.muted = true
