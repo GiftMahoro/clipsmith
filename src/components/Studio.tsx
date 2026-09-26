@@ -89,6 +89,9 @@ export default function Studio() {
   const [dragOver, setDragOver] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const analyzingRef = useRef(false)
+  const [linkInput, setLinkInput] = useState('')
+  const [linkBusy, setLinkBusy] = useState(false)
+  const [linkStatus, setLinkStatus] = useState('')
 
   const setP = (pct: number, label: string, phases: PhaseState[]) =>
     setProg({ pct: Math.min(100, Math.max(0, pct)), label, phases })
@@ -218,6 +221,76 @@ export default function Studio() {
     void runAnalysis(file, url)
   }
 
+  /** Fetch a video from a direct link, then run it through the normal pipeline. */
+  const onLink = async () => {
+    const raw = linkInput.trim()
+    if (!raw || linkBusy) return
+    let parsed: URL
+    try {
+      parsed = new URL(raw)
+      if (!/^https?:$/.test(parsed.protocol)) throw new Error('bad protocol')
+    } catch {
+      setError("That doesn't look like a valid web link — it needs to start with http(s)://.")
+      setStage('error')
+      return
+    }
+    setLinkBusy(true)
+    setLinkStatus('Connecting…')
+    try {
+      const res = await fetch(parsed.toString())
+      if (!res.ok) throw new Error(`The link returned HTTP ${res.status}.`)
+      const ct = res.headers.get('content-type') || ''
+      if (!ct.startsWith('video/')) {
+        if (ct.includes('text/html')) {
+          throw new Error(
+            "That link opened a web page, not a video file. YouTube, TikTok and Instagram links can't be fetched directly — download the video first, then upload the file (or send me the link and I'll pull it for you).",
+          )
+        }
+        throw new Error(
+          `That link returned "${ct || 'an unknown file type'}", not a video file. It needs to be a direct link to a video file (MP4 works best).`,
+        )
+      }
+      if (!res.body) throw new Error('Download failed (empty response).')
+      const total = Number(res.headers.get('content-length') || 0)
+      const reader = res.body.getReader()
+      const chunks: BlobPart[] = []
+      let received = 0
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        chunks.push(value)
+        received += value.byteLength
+        if (received > 2 * 1024 * 1024 * 1024) {
+          throw new Error('That file is over 2 GB — too large to process in the browser.')
+        }
+        const mb = (received / 1048576).toFixed(1)
+        setLinkStatus(
+          total > 0 ? `Downloading… ${mb} MB of ${(total / 1048576).toFixed(0)} MB` : `Downloading… ${mb} MB`,
+        )
+      }
+      const type = ct.split(';')[0]
+      const base = parsed.pathname.split('/').pop() || 'video'
+      const name = /\.\w{2,5}$/.test(base) ? base : `${base}.mp4`
+      const file = new File(chunks, name, { type })
+      setLinkInput('')
+      setLinkBusy(false)
+      setLinkStatus('')
+      onFile(file)
+    } catch (e) {
+      setLinkBusy(false)
+      setLinkStatus('')
+      const msg = e instanceof Error ? e.message : 'Download failed.'
+      if (/failed to fetch|networkerror|load failed/i.test(msg)) {
+        setError(
+          "Couldn't download from that link — the host is blocking cross-site downloads. Try a different host, or upload the file instead.",
+        )
+      } else {
+        setError(msg)
+      }
+      setStage('error')
+    }
+  }
+
   const handleExport = async () => {
     if (!selected || !videoUrl || !result || !settings) return
     setExporting(true)
@@ -260,6 +333,7 @@ export default function Studio() {
   return (
     <div className="studio">
       {stage === 'idle' && (
+        <>
         <div
           className={`drop ${dragOver ? 'over' : ''}`}
           onClick={() => inputRef.current?.click()}
@@ -285,6 +359,28 @@ export default function Studio() {
             onChange={(e) => onFile(e.target.files?.[0])}
           />
         </div>
+        <div className="link-row">
+          <div className="link-div">or paste a video link</div>
+          <div className="link-input-row">
+            <input
+              type="url"
+              inputMode="url"
+              placeholder="https://… direct link to a video file"
+              value={linkInput}
+              disabled={linkBusy}
+              onChange={(e) => setLinkInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void onLink()
+              }}
+            />
+            <button className="btn-primary" disabled={linkBusy || !linkInput.trim()} onClick={() => void onLink()}>
+              {linkBusy ? 'Fetching…' : 'Fetch video'}
+            </button>
+          </div>
+          {linkBusy && linkStatus && <p className="fine">{linkStatus}</p>}
+          <p className="fine">Direct file links work (MP4). YouTube / TikTok / Instagram links can't be fetched directly — download those first, then upload.</p>
+        </div>
+        </>
       )}
 
       {(stage === 'analyzing' || stage === 'ready') && videoUrl && (
